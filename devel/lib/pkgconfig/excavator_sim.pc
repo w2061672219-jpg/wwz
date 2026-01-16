@@ -1,0 +1,8 @@
+prefix=/wwz/devel
+
+Name: excavator_sim
+Description: Description of excavator_sim
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

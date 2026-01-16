@@ -7,4 +7,8 @@
 # new environment variables
 
 # modified environment variables
+export CMAKE_PREFIX_PATH="/wwz/devel:$CMAKE_PREFIX_PATH"
+export LD_LIBRARY_PATH="/wwz/devel/lib:$LD_LIBRARY_PATH"
 export PWD='/wwz/build'
+export ROSLISP_PACKAGE_DIRECTORIES='/wwz/devel/share/common-lisp'
+export ROS_PACKAGE_PATH="/wwz/src:$ROS_PACKAGE_PATH"
