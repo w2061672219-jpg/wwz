@@ -1,0 +1,2 @@
+.
+-DCATKIN_DEVEL_PREFIX=/wwz/devel -DCMAKE_INSTALL_PREFIX=/wwz/install -G Unix Makefiles
