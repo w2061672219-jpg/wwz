@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 加载控制器配置到参数服务器 -->
+    <rosparam file="$(find excavator_sim)/config/controllers.yaml" command="load"/>
+
+    <!-- 启动控制器管理器 -->
+    <node name="controller_spawner" pkg="controller_manager" type="spawner"
+          respawn="false" output="screen"
+          args="joint_state_controller
+                boom_position_controller
+                arm_position_controller
+                bucket_position_controller
+                swing_position_controller"/>
+
+    <!-- 发布机器人状态 -->
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher">
+        <param name="publish_frequency" value="50"/>
+    </node>
+</launch>
