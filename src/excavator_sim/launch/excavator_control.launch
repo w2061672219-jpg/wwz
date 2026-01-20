@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 启动 Gazebo 仿真 -->
+    <include file="$(find excavator_sim)/launch/gazebo.launch">
+        <arg name="paused" value="false"/>
+    </include>
+
+    <!-- 加载控制器参数 -->
+    <rosparam file="$(find excavator_sim)/config/joint_controllers.yaml" command="load"/>
+
+    <!-- 启动控制器 -->
+    <node name="controller_spawner" pkg="controller_manager" type="spawner"
+          respawn="false" output="screen"
+          ns="excavator"
+          args="joint_state_controller
+                boom_position_controller
+                arm_position_controller
+                bucket_position_controller
+                swing_position_controller"/>
+</launch>

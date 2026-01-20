@@ -2,13 +2,13 @@
 <robot name="excavator" xmlns:xacro="http://www.ros.org/wiki/xacro">
   
   <!-- 参数定义 -->
-  <xacro:property name="chassis_length" value="2.0"/>
+  <xacro:property name="chassis_length" value="2.5"/>
   <xacro:property name="chassis_width" value="1.2"/>
   <xacro:property name="chassis_height" value="0.4"/>
   <xacro:property name="track_width" value="0.3"/>
   <xacro:property name="track_radius" value="0.25"/>
   
-  <xacro:property name="cabin_length" value="1.0"/>
+  <xacro:property name="cabin_length" value="1.6"/>
   <xacro:property name="cabin_width" value="0.8"/>
   <xacro:property name="cabin_height" value="1.0"/>
   
@@ -97,12 +97,10 @@
     </inertial>
   </link>
 
-  <joint name="left_track_joint" type="continuous">
+  <joint name="left_track_joint" type="fixed">
     <parent link="chassis"/>
     <child link="left_track"/>
     <origin xyz="0 ${chassis_width/2 + track_width/2} ${-chassis_height/2}" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
-    <dynamics damping="10.0" friction="5.0"/>
   </joint>
 
   <!-- 右履带 -->
@@ -124,12 +122,10 @@
     </inertial>
   </link>
 
-  <joint name="right_track_joint" type="continuous">
+  <joint name="right_track_joint" type="fixed">
     <parent link="chassis"/>
     <child link="right_track"/>
     <origin xyz="0 ${-chassis_width/2 - track_width/2} ${-chassis_height/2}" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
-    <dynamics damping="10.0" friction="5.0"/>
   </joint>
 
   <!-- ========== 座舱回转平台 ========== -->
@@ -159,7 +155,7 @@
     <child link="turret"/>
     <origin xyz="0 0 ${chassis_height/2}" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <dynamics damping="100.0" friction="10.0"/>
+    <dynamics damping="10.0" friction="10.0"/>
     <limit effort="10000" velocity="1.0"/>
   </joint>
 
@@ -190,8 +186,8 @@
     <child link="boom"/>
     <origin xyz="${cabin_length/2} 0 ${cabin_height}" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <dynamics damping="50.0" friction="5.0"/>
-    <limit lower="-0.5" upper="1.2" effort="50000" velocity="0.5"/>
+    <dynamics damping="100.0" friction="10.0"/>
+    <limit lower="-1.5" upper="0.5" effort="1000000" velocity="0.5"/>
   </joint>
 
   <!-- ========== 小臂 (Arm/Stick) ========== -->
@@ -221,8 +217,8 @@
     <child link="arm"/>
     <origin xyz="${boom_length} 0 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <dynamics damping="30.0" friction="3.0"/>
-    <limit lower="-2.5" upper="0.5" effort="30000" velocity="0.6"/>
+    <dynamics damping="100.0" friction="100.0"/>
+    <limit lower="-1.0" upper="2.5" effort="30000" velocity="0.6"/>
   </joint>
 
   <!-- ========== 铲斗 (Bucket) ========== -->
@@ -252,7 +248,7 @@
     <child link="bucket"/>
     <origin xyz="${arm_length} 0 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <dynamics damping="20.0" friction="2.0"/>
+    <dynamics damping="50.0" friction="50.0"/>
     <limit lower="-1.5" upper="1.5" effort="15000" velocity="0.8"/>
   </joint>
 
@@ -382,5 +378,4 @@
   <gazebo reference="bucket_tip">
     <material>Gazebo/Red</material>
   </gazebo>
-
 </robot>

@@ -1,0 +1,4 @@
+{
+    "ROS2.distro": "noetic",
+    "cmake.sourceDirectory": "/wwz/src/excavator_sim"
+}
