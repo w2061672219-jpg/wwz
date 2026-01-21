@@ -155,8 +155,8 @@
     <child link="turret"/>
     <origin xyz="0 0 ${chassis_height/2}" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <dynamics damping="10.0" friction="10.0"/>
-    <limit effort="10000" velocity="1.0"/>
+    <dynamics damping="5.0" friction="1.0"/>
+    <!-- <limit effort="10000" velocity="1.0"/> -->
   </joint>
 
   <!-- ========== 大臂 (Boom) ========== -->
@@ -275,23 +275,15 @@
   </joint>
 
   <!-- ========== Gazebo 插件 ========== -->
-  <!-- 差速驱动控制器 -->
+  <!-- 平面移动插件 -->
   <gazebo>
-    <plugin name="differential_drive_controller" filename="libgazebo_ros_diff_drive.so">
-      <legacyMode>false</legacyMode>
-      <alwaysOn>true</alwaysOn>
-      <updateRate>50</updateRate>
-      <leftJoint>left_track_joint</leftJoint>
-      <rightJoint>right_track_joint</rightJoint>
-      <wheelSeparation>${chassis_width + track_width}</wheelSeparation>
-      <wheelDiameter>${track_radius * 2}</wheelDiameter>
-      <torque>1000</torque>
-      <commandTopic>cmd_vel</commandTopic>
+    <plugin name="planar_move_controller" filename="libgazebo_ros_planar_move.so">
+      <commandTopic>/excavator/cmd_vel</commandTopic>
       <odometryTopic>odom</odometryTopic>
       <odometryFrame>odom</odometryFrame>
       <robotBaseFrame>base_footprint</robotBaseFrame>
-      <publishWheelTF>true</publishWheelTF>
-      <publishWheelJointState>true</publishWheelJointState>
+      <odometryRate>50.0</odometryRate>
+      <publishOdometryTf>true</publishOdometryTf>
     </plugin>
   </gazebo>
 
