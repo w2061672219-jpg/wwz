@@ -67,8 +67,8 @@
       </geometry>
     </collision>
     <inertial>
-      <mass value="5000"/>
-      <xacro:box_inertia m="5000" x="${chassis_length}" y="${chassis_width}" z="${chassis_height}"/>
+      <mass value="8000"/>
+      <xacro:box_inertia m="8000" x="${chassis_length}" y="${chassis_width}" z="${chassis_height}"/>
     </inertial>
   </link>
 
