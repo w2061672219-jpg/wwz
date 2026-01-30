@@ -2,260 +2,252 @@
 # -*- coding: utf-8 -*-
 
 import math
-import csv
 import rospy
+import time
 import numpy as np
+import tf2_ros
 from std_msgs.msg import Float64
 
-# 假定你已经有这个类：从前面的回答里复制过来
-from kinematics import ExcavatorKinematics
-
+try:
+    from kinematics import ExcavatorKinematics
+    from plot import plot_trajectories_2d
+except ImportError:
+    rospy.logerr("错误：请确保 kinematics.py 和 plot.py 在同一目录下！")
+    exit()
 
 class FuxiWriter(object):
     def __init__(self):
         rospy.init_node("write_fuxi_trajectory")
+        
+        self.rate_hz = 10
+        self.rate = rospy.Rate(self.rate_hz)
+        self.target_pitch = -0.6 
 
-        # === 1. 载入 / 写死轨迹配置 ===
-        self.cfg = self.build_config_from_hardcode()
-
-        # === 2. 运动学对象 ===
+        self.waypoints = self.build_fuxi_waypoints()
         self.kin = ExcavatorKinematics()
 
-        # === 3. 控制器 Publisher ===
-        self.pub_swing = rospy.Publisher(
-            "/excavator/swing_position_controller/command",
-            Float64,
-            queue_size=10,
-        )
-        self.pub_boom = rospy.Publisher(
-            "/excavator/boom_position_controller/command",
-            Float64,
-            queue_size=10,
-        )
-        self.pub_arm = rospy.Publisher(
-            "/excavator/arm_position_controller/command",
-            Float64,
-            queue_size=10,
-        )
-        self.pub_bucket = rospy.Publisher(
-            "/excavator/bucket_position_controller/command",
-            Float64,
-            queue_size=10,
-        )
+        self.pub_swing = rospy.Publisher("/excavator/swing_position_controller/command", Float64, queue_size=10)
+        self.pub_boom = rospy.Publisher("/excavator/boom_position_controller/command", Float64, queue_size=10)
+        self.pub_arm = rospy.Publisher("/excavator/arm_position_controller/command", Float64, queue_size=10)
+        self.pub_bucket = rospy.Publisher("/excavator/bucket_position_controller/command", Float64, queue_size=10)
 
-        # === 4. 记录数据用 ===
-        self.record_file = rospy.get_param("~record_file", "fuxi_trajectory.csv")
-        self.csv_f = open(self.record_file, "w")
-        self.csv_writer = csv.writer(self.csv_f)
-        self.csv_writer.writerow(
-            [
-                "t",
-                "cmd_swing",
-                "cmd_boom",
-                "cmd_arm",
-                "cmd_bucket",
-                "fk_x",
-                "fk_y",
-                "fk_z",
-            ]
-        )
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        # 目标末端俯仰角（相对水平，负数是“略向下挖”）
-        self.target_pitch = rospy.get_param("~target_pitch", -0.6)
+        self.ref_traj_xyz = []
+        self.actual_traj_xyz = []
 
-        # 控制频率（Hz）
-        self.rate_hz = rospy.get_param("~rate", 50.0)
-        self.rate = rospy.Rate(self.rate_hz)
+    def build_fuxi_waypoints(self):
+        """
+        【重新设计】生成"伏羲"二字的笔画路径点
+        
+        坐标系说明：
+        - X轴：前后方向，X越大越远离挖掘机（向前）
+        - Y轴：左右方向，Y正为左，Y负为右
+        - Z轴：上下方向
+        
+        铲斗初始位置约(6.1, 0, 1.15)，所以字要写在X=5.0~6.0范围内
+        
+        "伏"字在右边（Y为负），"羲"字在左边（Y为正）
+        """
+        points = []
+        
+        # === 书写参数设置 ===
+        Z_DRAW = 0.5   # 落笔高度
+        Z_SAFE = 1.2   # 抬笔高度
+        STEP = 0.05    # 插值步长
+        
+        def add_stroke(start_pt, end_pt):
+            """添加一个笔画"""
+            # 1. 抬笔移动到起点上方
+            points.append([start_pt[0], start_pt[1], Z_SAFE, False])
+            # 2. 落笔
+            points.append([start_pt[0], start_pt[1], Z_DRAW, True])
+            # 3. 插值画线
+            dist = math.sqrt((end_pt[0]-start_pt[0])**2 + (end_pt[1]-start_pt[1])**2)
+            steps = max(int(dist / STEP), 2)
+            for i in range(1, steps + 1):
+                alpha = i / float(steps)
+                x = start_pt[0] + (end_pt[0] - start_pt[0]) * alpha
+                y = start_pt[1] + (end_pt[1] - start_pt[1]) * alpha
+                points.append([x, y, Z_DRAW, True])
+            # 4. 抬笔
+            points.append([end_pt[0], end_pt[1], Z_SAFE, False])
 
-    # ------------------------------------------------------------
-    # 把你给的 YAML 配置写成一个 Python dict
-    # （如果你已经存为 .yaml，用 yaml.safe_load 读出来即可）
-    # ------------------------------------------------------------
-    def build_config_from_hardcode(self):
-        cfg = {
-            "writing_plane": {
-                "z_height": 0.8,
-                "x_offset": 4.0,
-                "y_offset": 0.0,
-                "scale": 2.0,
-            },
-            "stroke_gap": {
-                "lift_height": 0.3,
-                "move_speed": 0.5,
-            },
-            "fu_character": {
-                "strokes": [
-                    {"name": "pie", "points": [[0.0, 0.8, 0.0], [-0.3, 0.4, 0.0], [-0.5, 0.0, 0.0]]},
-                    {"name": "heng", "points": [[-0.2, 0.6, 0.0], [0.4, 0.6, 0.0]]},
-                    {"name": "pie2", "points": [[0.1, 0.6, 0.0], [-0.1, 0.3, 0.0], [-0.3, 0.0, 0.0]]},
-                    {"name": "na", "points": [[0.1, 0.5, 0.0], [0.3, 0.3, 0.0], [0.5, 0.0, 0.0]]},
-                    {"name": "dian", "points": [[0.3, 0.7, 0.0], [0.35, 0.65, 0.0]]},
-                ]
-            },
-            "xi_character": {
-                "x_offset": 1.2,
-                "strokes": [
-                    {"name": "heng1", "points": [[-0.3, 0.9, 0.0], [0.3, 0.9, 0.0]]},
-                    {"name": "pie1", "points": [[-0.1, 0.9, 0.0], [-0.3, 0.6, 0.0]]},
-                    {"name": "dian1", "points": [[0.1, 0.85, 0.0], [0.2, 0.7, 0.0]]},
-                    {"name": "heng2", "points": [[-0.25, 0.6, 0.0], [0.25, 0.6, 0.0]]},
-                    {"name": "shu", "points": [[0.0, 0.6, 0.0], [0.0, 0.3, 0.0]]},
-                    {"name": "bottom_left", "points": [[-0.3, 0.3, 0.0], [-0.4, 0.0, 0.0]]},
-                    {"name": "bottom_mid", "points": [[-0.1, 0.3, 0.0], [0.0, 0.0, 0.0]]},
-                    {"name": "bottom_right", "points": [[0.2, 0.3, 0.0], [0.4, 0.0, 0.0]]},
-                ],
-            },
-        }
-        return cfg
+        # ==========================================
+        # "伏"字 (右侧，Y为负，中心约 Y=-0.6)
+        # 字体范围：X: 5.2~6.0, Y: -1.0~-0.2
+        # ==========================================
+        
+        # --- 单人旁 ---
+        # 1. 撇：从右上到左下（X减小，Y略变）
+        add_stroke((5.9, -0.3), (5.5, -0.4))
+        # 2. 竖：从上到下（X减小，Y不变）
+        add_stroke((5.7, -0.35), (5.3, -0.35))
+        
+        # --- 右边"犬" ---
+        # 3. 横：左右方向（X不变，Y变化）
+        add_stroke((5.8, -0.5), (5.8, -0.9))
+        # 4. 撇：从中间向左下
+        add_stroke((5.7, -0.7), (5.3, -0.5))
+        # 5. 捺：从中间向右下
+        add_stroke((5.6, -0.7), (5.2, -1.0))
+        # 6. 点：右上角小点
+        add_stroke((5.85, -0.85), (5.8, -0.9))
 
-    # ------------------------------------------------------------
-    # 字形坐标 -> 世界坐标
-    # ------------------------------------------------------------
-    def letter_to_world(self, x_local, y_local, which_char, char_cfg):
-        wp = self.cfg["writing_plane"]
-        scale = wp["scale"]
+        # ==========================================
+        # "羲"字 (左侧，Y为正，中心约 Y=0.6)
+        # 字体范围：X: 5.0~6.0, Y: 0.2~1.0
+        # 羲字复杂，简化表示
+        # ==========================================
 
-        # 基础平移
-        x = wp["x_offset"] + scale * x_local
-        y = wp["y_offset"] + scale * y_local
+        # --- 上部 "羊" 的简化 ---
+        # 两点
+        add_stroke((5.95, 0.5), (5.9, 0.55))
+        add_stroke((5.95, 0.7), (5.9, 0.75))
+        # 三横
+        add_stroke((5.85, 0.4), (5.85, 0.9))
+        add_stroke((5.75, 0.35), (5.75, 0.95))
+        add_stroke((5.65, 0.4), (5.65, 0.9))
+        # 中间竖
+        add_stroke((5.9, 0.65), (5.55, 0.65))
 
-        # “羲”字整体再往右偏 x_offset
-        if which_char == "xi":
-            x += scale * char_cfg.get("x_offset", 0.0)
+        # --- 中下部结构简化 ---
+        # 横折
+        add_stroke((5.5, 0.45), (5.5, 0.85))
+        add_stroke((5.5, 0.85), (5.35, 0.85))
+        
+        # 左下撇
+        add_stroke((5.45, 0.5), (5.2, 0.35))
+        
+        # --- 斜钩（戈的主笔）---
+        add_stroke((5.8, 0.3), (5.15, 0.95))
+        
+        # 右下点
+        add_stroke((5.2, 0.9), (5.15, 0.95))
 
-        z = wp["z_height"]  # 写字平面高度
-        return x, y, z
-
-    # ------------------------------------------------------------
-    # 在两点之间插 N 步，让轨迹更平滑一些
-    # ------------------------------------------------------------
-    def interpolate_segment(self, p0, p1, num_steps):
-        p0 = np.array(p0, dtype=float)
-        p1 = np.array(p1, dtype=float)
-        for i in range(num_steps):
-            t = float(i) / max(1, (num_steps - 1))
-            yield (1 - t) * p0 + t * p1
-
-    # ------------------------------------------------------------
-    # 生成整个“伏羲”末端轨迹（世界坐标）
-    # 返回：list of dict，每个元素包含：
-    #   {"x":..., "y":..., "z":..., "pen": True/False}
-    # pen=True 表示在写字，False 表示提笔移动
-    # ------------------------------------------------------------
-    def build_world_trajectory(self):
-        traj = []
-
-        wp = self.cfg["writing_plane"]
-        stroke_gap = self.cfg["stroke_gap"]
-        lift_height = stroke_gap["lift_height"]
-
-        # 先写“伏”，再写“羲”
-        for which_char in ["fu", "xi"]:
-            if which_char == "fu":
-                char_cfg = self.cfg["fu_character"]
-            else:
-                char_cfg = self.cfg["xi_character"]
-
-            strokes = char_cfg["strokes"]
-
-            prev_end = None
-            for si, stroke in enumerate(strokes):
-                pts_local = stroke["points"]
-
-                # 1) 当前笔画所有点映射到世界坐标
-                pts_world = []
-                for (xl, yl, zl) in pts_local:
-                    xw, yw, zw = self.letter_to_world(
-                        xl, yl, which_char, char_cfg
-                    )
-                    pts_world.append([xw, yw, zw])
-
-                # 2) 如果不是第一笔：提笔 -> 移动到下一笔起点 -> 落笔
-                start_pt = pts_world[0]
-                if prev_end is not None:
-                    # 提笔
-                    up_start = [prev_end[0], prev_end[1], wp["z_height"] + lift_height]
-                    up_end = [start_pt[0], start_pt[1], wp["z_height"] + lift_height]
-
-                    # prev_end -> 上方
-                    for p in self.interpolate_segment(prev_end, up_start, 10):
-                        traj.append({"x": p[0], "y": p[1], "z": p[2], "pen": False})
-                    # 上方移动
-                    for p in self.interpolate_segment(up_start, up_end, 10):
-                        traj.append({"x": p[0], "y": p[1], "z": p[2], "pen": False})
-                    # 落笔
-                    for p in self.interpolate_segment(up_end, start_pt, 10):
-                        traj.append({"x": p[0], "y": p[1], "z": p[2], "pen": False})
-
-                # 3) 写当前这一笔：点之间插点，pen=True
-                for i in range(len(pts_world) - 1):
-                    p0 = pts_world[i]
-                    p1 = pts_world[i + 1]
-                    for p in self.interpolate_segment(p0, p1, 20):
-                        traj.append({"x": p[0], "y": p[1], "z": p[2], "pen": True})
-
-                prev_end = pts_world[-1]
-
-        return traj
-
-    # ------------------------------------------------------------
-    # 执行轨迹
-    # ------------------------------------------------------------
+        return points
+    
+    def get_bucket_tip_position(self):
+        """从TF获取铲斗尖端实际位置"""
+        try:
+            trans = self.tf_buffer.lookup_transform('base_footprint', 'bucket_tip', rospy.Time(0))
+            return (trans.transform.translation.x, 
+                    trans.transform.translation.y, 
+                    trans.transform.translation.z)
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            return None
+    
+    def send_joint_command(self, joints):
+        """发送关节指令"""
+        swing_rad, boom_rad, arm_rad, bucket_rad = joints
+        rospy.loginfo(f"Publishing: swing={math.degrees(swing_rad):.1f}°")
+        self.pub_swing.publish(swing_rad)
+        self.pub_boom.publish(boom_rad)
+        self.pub_arm.publish(arm_rad)
+        self.pub_bucket.publish(bucket_rad)
+    
+    def move_to_position(self, target_pos, wait_time=3.0):
+        """
+        移动到指定位置并等待到位
+        target_pos: [x, y, z]
+        wait_time: 等待时间（秒）
+        """
+        joints = self.kin.inverse_kinematics(target_pos, self.target_pitch)
+        if joints:
+            self.send_joint_command(joints)
+            rospy.loginfo(f"移动到位置: ({target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f})")
+            rospy.sleep(wait_time)
+            return True
+        else:
+            rospy.logwarn(f"IK解算失败: {target_pos}")
+            return False
+    
     def run(self):
-        rospy.loginfo("Building world trajectory (Fuxi)...")
-        traj = self.build_world_trajectory()
-        rospy.loginfo("Total points in trajectory: %d", len(traj))
-
-        # 等待控制器连接
         rospy.sleep(1.0)
+        rospy.loginfo("开始执行 '伏羲' 书写任务...")
+        rospy.loginfo(f"总计路径点: {len(self.waypoints)}")
 
-        t0 = rospy.Time.now().to_sec()
-        for i, pt in enumerate(traj):
-            if rospy.is_shutdown():
+        if not self.waypoints:
+            rospy.logerr("路径点为空，无法执行！")
+            return
+
+        # ==================== 关键修正：先移动到起点 ====================
+        rospy.loginfo("=" * 50)
+        rospy.loginfo("第一步：移动到轨迹起始点上方...")
+        rospy.loginfo("=" * 50)
+        
+        first_pt = self.waypoints[0]
+        # 先移动到一个安全的中间位置（在起点上方）
+        start_safe_pos = [first_pt[0], first_pt[1], 1.5]
+        
+        if not self.move_to_position(start_safe_pos, wait_time=8.0):
+            rospy.logerr("无法移动到起始位置，退出！")
+            return
+        
+        rospy.loginfo("已到达起始位置上方，开始书写...")
+        rospy.loginfo("=" * 50)
+        # ==============================================================
+
+        start_time = time.time()
+        
+        for i, pt in enumerate(self.waypoints):
+            if rospy.is_shutdown(): 
                 break
-
-            x = pt["x"]
-            y = pt["y"]
-            z = pt["z"]
-
-            # 逆运动学，得到关节角
-            joints = self.kin.inverse_kinematics([x, y, z], self.target_pitch)
-            if joints is None:
-                rospy.logwarn("IK failed for point #%d: (%.3f, %.3f, %.3f)", i, x, y, z)
-                # 可以选择跳过 / 停止，这里先跳过
-                continue
-
-            q_swing, q_boom, q_arm, q_bucket = joints
-
-            # 发布到控制器
-            self.pub_swing.publish(Float64(q_swing))
-            self.pub_boom.publish(Float64(q_boom))
-            self.pub_arm.publish(Float64(q_arm))
-            self.pub_bucket.publish(Float64(q_bucket))
-
-            # 用 FK 算一下当前命令对应的末端位置，用来记录轨迹
-            fk_pos = self.kin.forward_kinematics(joints)
-
-            t_now = rospy.Time.now().to_sec() - t0
-            self.csv_writer.writerow(
-                [
-                    f"{t_now:.4f}",
-                    f"{q_swing:.6f}",
-                    f"{q_boom:.6f}",
-                    f"{q_arm:.6f}",
-                    f"{q_bucket:.6f}",
-                    f"{fk_pos[0]:.4f}",
-                    f"{fk_pos[1]:.4f}",
-                    f"{fk_pos[2]:.4f}",
-                ]
-            )
+            
+            target_x, target_y, target_z, is_drawing = pt
+            
+            joints = self.kin.inverse_kinematics([target_x, target_y, target_z], self.target_pitch)
+            
+            if joints:
+                self.send_joint_command(joints)
+                
+                # 记录数据（仅在落笔时）
+                if is_drawing:
+                    self.ref_traj_xyz.append([target_x, target_y, target_z])
+                    actual_pos = self.get_bucket_tip_position()
+                    if actual_pos is not None:
+                        self.actual_traj_xyz.append(actual_pos)
+                
+                # 进度显示
+                if i % 20 == 0:
+                    rospy.loginfo(f"进度: {i}/{len(self.waypoints)} ({100*i/len(self.waypoints):.1f}%)")
+            else:
+                rospy.logwarn(f"点 {i} IK解算失败: ({target_x:.2f}, {target_y:.2f}, {target_z:.2f})")
 
             self.rate.sleep()
 
-        rospy.loginfo("Fuxi trajectory finished.")
-        self.csv_f.close()
-
+        duration = time.time() - start_time
+        rospy.loginfo(f"关节指令发送完毕! 耗时: {duration:.2f}秒")
+        
+        # === 等待挖掘机完成运动 ===
+        rospy.loginfo("等待挖掘机完成最后的运动（10秒）...")
+        
+        # 持续采集实际轨迹
+        for i in range(100):  # 10秒
+            if rospy.is_shutdown():
+                break
+            actual_pos = self.get_bucket_tip_position()
+            if actual_pos is not None and len(self.actual_traj_xyz) > 0:
+                # 可以选择追加或更新
+                pass
+            rospy.sleep(0.1)
+        
+        # === 绘图 ===
+        rospy.loginfo("=" * 50)
+        rospy.loginfo("正在生成 2D 轨迹对比图...")
+        rospy.loginfo(f"期望轨迹点数: {len(self.ref_traj_xyz)}")
+        rospy.loginfo(f"实际轨迹点数: {len(self.actual_traj_xyz)}")
+        
+        if len(self.ref_traj_xyz) > 0:
+            plot_trajectories_2d(self.ref_traj_xyz, self.actual_traj_xyz, save_path="fuxi_2d_final.png")
+            rospy.loginfo("图片已保存: fuxi_2d_final.png")
+        else:
+            rospy.logerr("没有记录到轨迹数据！")
 
 if __name__ == "__main__":
-    writer = FuxiWriter()
-    writer.run()
+    try:
+        writer = FuxiWriter()
+        writer.run()
+    except rospy.ROSInterruptException:
+        pass
