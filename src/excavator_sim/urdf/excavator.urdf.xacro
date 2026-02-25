@@ -187,7 +187,7 @@
     <origin xyz="${cabin_length/2} 0 ${cabin_height}" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <dynamics damping="100.0" friction="10.0"/>
-    <limit lower="-1.5" upper="0.5" effort="1000000" velocity="0.5"/>
+    <limit lower="-2.0" upper="1.5" effort="1000000" velocity="0.5"/>
   </joint>
 
   <!-- ========== 小臂 (Arm/Stick) ========== -->
@@ -218,7 +218,7 @@
     <origin xyz="${boom_length} 0 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <dynamics damping="100.0" friction="100.0"/>
-    <limit lower="-1.0" upper="2.5" effort="30000" velocity="0.6"/>
+    <limit lower="-2.8" upper="2.5" effort="30000" velocity="0.6"/>
   </joint>
 
   <!-- ========== 铲斗 (Bucket) ========== -->
@@ -249,7 +249,7 @@
     <origin xyz="${arm_length} 0 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <dynamics damping="50.0" friction="50.0"/>
-    <limit lower="-1.5" upper="1.5" effort="15000" velocity="0.8"/>
+    <limit lower="-3.14" upper="3.14" effort="15000" velocity="0.8"/>
   </joint>
 
   <!-- 铲斗末端（用于轨迹跟踪） -->

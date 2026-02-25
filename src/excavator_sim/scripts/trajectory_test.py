@@ -5,179 +5,242 @@ import math
 import rospy
 import time
 import numpy as np
-import tf2_ros  # 引入 TF2
+import PyKDL
+import matplotlib.pyplot as plt
 from std_msgs.msg import Float64
-from geometry_msgs.msg import TransformStamped
+from sensor_msgs.msg import JointState
 
-# 尝试导入绘图和运动学库
-try:
-    from kinematics import ExcavatorKinematics
-    from plot import plot_trajectories_2d
-except ImportError:
-    rospy.logerr("错误：请确保 kinematics.py 和 plot.py 在同一目录下！")
-    exit()
-
-class FuxiWriter(object):
+# =========================================
+# 1. 运动学类 (包含智能搜索 IK)
+# =========================================
+class ExcavatorKinematicsKDL:
     def __init__(self):
-        # 1. 初始化节点
-        rospy.init_node("write_fuxi_realtime")
-        
-        # 2. 初始化 TF 监听器 (核心修改部分)
-        #    这将允许我们查询 "bucket_tip" 在 "base_footprint" 坐标系下的真实位置
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-        
-        # 给 TF 一点时间建立缓存
-        rospy.sleep(1.0)
+        # 几何参数 (基于 URDF)
+        self.H_BASE_TOTAL = 1.65
+        self.OFFSET_BOOM_X = 0.8 
+        self.L_BOOM = 2.5
+        self.L_ARM = 2.0
+        self.L_BUCKET_X = 0.8 
+        self.L_BUCKET_Z = -0.5
 
-        # 3. 初始化控制频率
-        self.rate_hz = 10
-        self.rate = rospy.Rate(self.rate_hz)
-        self.target_pitch = -0.6 
+        # 构建 KDL 链条
+        self.chain = PyKDL.Chain()
+        self.chain.addSegment(PyKDL.Segment(PyKDL.Joint(PyKDL.Joint.RotY), PyKDL.Frame(PyKDL.Vector(self.L_BOOM, 0, 0))))
+        self.chain.addSegment(PyKDL.Segment(PyKDL.Joint(PyKDL.Joint.RotY), PyKDL.Frame(PyKDL.Vector(self.L_ARM, 0, 0))))
+        vec_tip = PyKDL.Vector(self.L_BUCKET_X, 0, self.L_BUCKET_Z)
+        self.chain.addSegment(PyKDL.Segment(PyKDL.Joint(PyKDL.Joint.RotY), PyKDL.Frame(vec_tip)))
 
-        # 4. 生成“伏羲”轨迹点 (期望路径)
-        self.waypoints = self.build_fuxi_waypoints()
+        # 求解器
+        self.fk_solver = PyKDL.ChainFkSolverPos_recursive(self.chain)
+        self.ik_solver_vel = PyKDL.ChainIkSolverVel_pinv(self.chain)
         
-        # 5. 运动学解算器 (用于计算发给电机的角度)
-        self.kin = ExcavatorKinematics()
+        # 关节限制 (宽限版)
+        self.q_min = PyKDL.JntArray(3)
+        self.q_max = PyKDL.JntArray(3)
+        self.q_min[0] = -2.0; self.q_max[0] = 1.5   # Boom
+        self.q_min[1] = -2.8; self.q_max[1] = 1.0   # Arm
+        self.q_min[2] = -3.0; self.q_max[2] = 3.0   # Bucket (非常宽)
 
-        # 6. 初始化 Publishers
+        self.ik_solver = PyKDL.ChainIkSolverPos_NR_JL(
+            self.chain, self.q_min, self.q_max, 
+            self.fk_solver, self.ik_solver_vel, 200, 1e-4
+        )
+        
+        # 缓存上一次的解作为 Seed，防止抽搐
+        self.last_q = PyKDL.JntArray(3)
+        self.last_q[0] = -0.5
+        self.last_q[1] = -1.0
+        self.last_q[2] = -0.5
+
+    def solve_ik_smart(self, x_global, z_global, preferred_pitch=-1.57):
+        """
+        智能 IK：如果首选角度不可达，尝试搜索附近的角度。
+        优先保证 (x, z) 到达。
+        """
+        # 1. 坐标转换：全局 -> 局部
+        x_local = x_global - self.OFFSET_BOOM_X
+        z_local = z_global - self.H_BASE_TOTAL
+        
+        target_pos = PyKDL.Vector(x_local, 0, z_local)
+        
+        # 2. 定义搜索范围：优先 Pitch, 然后向两侧搜索
+        # 搜索范围：首选角度 +/- 1.0 弧度 (约 +/- 57度)
+        search_steps = [0, 0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.5, -0.5, 0.8, -0.8]
+        
+        for delta in search_steps:
+            test_pitch = preferred_pitch + delta
+            
+            # 构建目标 Frame
+            target_rot = PyKDL.Rotation.RotY(test_pitch)
+            target_frame = PyKDL.Frame(target_rot, target_pos)
+            
+            q_out = PyKDL.JntArray(3)
+            ret = self.ik_solver.CartToJnt(self.last_q, target_frame, q_out)
+            
+            if ret >= 0:
+                # 找到解了！更新 last_q 并返回
+                self.last_q = q_out
+                # 转换回 Python 列表
+                return [q_out[0], q_out[1], q_out[2]], test_pitch
+        
+        # 如果所有角度都尝试失败
+        return None, None
+
+    def get_current_fk(self, q_list):
+        # 正运动学，用于绘图
+        q_in = PyKDL.JntArray(3)
+        for i in range(3): q_in[i] = q_list[i]
+        
+        end_frame = PyKDL.Frame()
+        self.fk_solver.JntToCart(q_in, end_frame)
+        
+        x_local = end_frame.p[0]
+        z_local = end_frame.p[2]
+        
+        x_global = x_local + self.OFFSET_BOOM_X
+        z_global = z_local + self.H_BASE_TOTAL
+        return x_global, z_global
+
+# =========================================
+# 2. 执行与绘图逻辑
+# =========================================
+class SmartWriter:
+    def __init__(self):
+        rospy.init_node("smart_writer")
+        self.kin = ExcavatorKinematicsKDL()
+        
+        # 发布器
         self.pub_swing = rospy.Publisher("/excavator/swing_position_controller/command", Float64, queue_size=10)
         self.pub_boom = rospy.Publisher("/excavator/boom_position_controller/command", Float64, queue_size=10)
         self.pub_arm = rospy.Publisher("/excavator/arm_position_controller/command", Float64, queue_size=10)
         self.pub_bucket = rospy.Publisher("/excavator/bucket_position_controller/command", Float64, queue_size=10)
-
-        # 7. 数据记录
-        self.ref_traj_xyz = [] # 记录期望轨迹
-        self.real_traj_xyz = []  # 记录通过 TF 读到的真实轨迹
-
-    def build_fuxi_waypoints(self):
-        """
-        生成“伏羲”二字的笔画路径点 (安全范围版)
-        """
-        points = []
-        # 书写参数
-        Z_DRAW = 0.5
-        Z_SAFE = 1.2
-        STEP = 0.05
         
-        def add_stroke(start_pt, end_pt):
-            # 抬笔
-            points.append([start_pt[0], start_pt[1], Z_SAFE, False])
-            # 落笔准备
-            points.append([start_pt[0], start_pt[1], Z_DRAW, True])
-            # 插值画线
-            dist = math.sqrt((end_pt[0]-start_pt[0])**2 + (end_pt[1]-start_pt[1])**2)
-            steps = int(dist / STEP)
-            if steps < 2: steps = 2
-            for i in range(1, steps + 1):
-                alpha = i / float(steps)
-                x = start_pt[0] + (end_pt[0] - start_pt[0]) * alpha
-                y = start_pt[1] + (end_pt[1] - start_pt[1]) * alpha
-                points.append([x, y, Z_DRAW, True])
-            # 抬笔结束
-            points.append([end_pt[0], end_pt[1], Z_SAFE, False])
+        # 记录数据
+        self.ref_traj = []   # [x, y]
+        self.actual_traj = [] # [x, y]
+        
+        # 当前关节状态（用于绘图反馈）
+        self.current_joints = [0,0,0,0] # swing, boom, arm, bucket
+        rospy.Subscriber("/excavator/joint_states", JointState, self.cb_joints)
+        
+        time.sleep(1.0) # 等待连接
 
-        # === 伏 (X: 3.5~4.8, Y: 0.2~1.5) ===
-        # 单人旁
-        add_stroke((4.5, 0.6), (4.3, 0.8)) # 撇
-        add_stroke((4.4, 0.7), (4.0, 0.7)) # 竖
-        # 右边犬
-        add_stroke((4.5, 1.0), (4.5, 1.4)) # 横
-        add_stroke((4.5, 1.2), (3.8, 1.0)) # 撇弯
-        add_stroke((4.2, 1.1), (3.8, 1.4)) # 捺
-        add_stroke((4.4, 1.3), (4.5, 1.5)) # 点
-
-        # === 羲 (X: 3.5~4.8, Y: -1.5~-0.2) ===
-        # 羊
-        add_stroke((4.7, -0.8), (4.7, -0.4)) # 点/横
-        add_stroke((4.6, -1.0), (4.6, -0.2)) # 横
-        add_stroke((4.5, -0.6), (4.2, -0.6)) # 竖
-        add_stroke((4.4, -1.0), (4.4, -0.2)) # 横
-        add_stroke((4.2, -1.2), (4.2, 0.0))  # 长横
-        # 秀 (简写结构)
-        add_stroke((4.0, -1.0), (3.6, -1.2)) # 撇
-        add_stroke((4.0, -0.2), (3.6, 0.0))  # 捺
-        add_stroke((3.9, -0.6), (3.5, -0.8)) # 戈钩部分
-
-        return points
-
-    def get_real_pose_from_tf(self):
-        """
-        查询 TF 树，获取当前真实的末端坐标
-        返回: [x, y, z] 或 None
-        """
+    def cb_joints(self, msg):
+        # 简单的映射，你需要根据实际 joint_states 的 name 顺序调整
+        # 假设顺序是 swing, boom, arm, bucket
         try:
-            # 这里的 'base_footprint' 和 'bucket_tip' 需要和你的 URDF/TF树名称一致
-            # 如果报错找不到 bucket_tip，请尝试改成 bucket_link
-            trans = self.tf_buffer.lookup_transform('base_footprint', 'bucket_tip', rospy.Time(0))
-            
-            x = trans.transform.translation.x
-            y = trans.transform.translation.y
-            z = trans.transform.translation.z
-            return [x, y, z]
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-            # 偶尔查询失败是正常的，尤其是刚启动时
-            return None
+            # 这里简化处理，实际请通过 name 匹配
+            self.current_joints = msg.position 
+        except:
+            pass
 
-    def run(self):
-        rospy.loginfo(f"开始执行 '伏羲' 书写任务，总路径点: {len(self.waypoints)}")
-        rospy.loginfo("正在通过 TF 监听真实轨迹...")
-
-        start_time = rospy.Time.now()
-
-        for i, pt in enumerate(self.waypoints):
-            if rospy.is_shutdown():
-                break
-
-            target_x, target_y, target_z, is_draw = pt
-
-            # 1. 逆运动学计算 (IK)
-            # 注意：这里我们只计算目标的 joint 角度发给控制器
-            q = self.kin.inverse_kinematics([target_x, target_y, target_z], self.target_pitch)
-            
-            if q is None:
-                rospy.logwarn(f"点 {i} IK解算失败: ({target_x:.2f}, {target_y:.2f})")
-                continue
-
-            # 2. 发送控制指令
-            self.pub_swing.publish(q[0])
-            self.pub_boom.publish(q[1])
-            self.pub_arm.publish(q[2])
-            self.pub_bucket.publish(q[3])
-
-            # 3. 记录期望轨迹 (用于画图中的红线)
-            if is_draw:
-                self.ref_traj_xyz.append([target_x, target_y, target_z])
-
-            # 4. 等待执行 (物理运动需要时间)
-            self.rate.sleep()
-
-            # 5. 【核心】读取并记录真实位置 (用于画图中的蓝线)
-            #    在 sleep 之后读取，代表“此刻机器人在哪里”
-            real_pos = self.get_real_pose_from_tf()
-            if real_pos:
-                # 只有当高度接近书写高度时才记录，避免抬笔时的轨迹干扰视觉（可选）
-                # 这里为了看清所有动作，我们全部记录，或者只记录 is_draw 的部分
-                if is_draw: 
-                    self.real_traj_xyz.append(real_pos)
-
-        end_time = rospy.Time.now()
-        duration = (end_time - start_time).to_sec()
-        rospy.loginfo(f"任务完成! 耗时: {duration:.2f} 秒")
+    def run_square_test(self):
+        """画一个更合理位置的正方形"""
+        # 中心点设置在 (4.0, 0, 0.5)
+        center_x = 4.0
+        center_y = 0.0
+        draw_z = 0.5
+        size = 0.8  # 边长
         
-        # 6. 绘图保存
-        # 注意：这里传入的是 self.real_traj_xyz (TF数据)，不再是 FK 计算值
-        rospy.loginfo(f"正在绘图... 期望点数:{len(self.ref_traj_xyz)}, 真实点数:{len(self.real_traj_xyz)}")
+        # 生成路径点 (密集插值)
+        waypoints = []
         
-        if len(self.real_traj_xyz) > 0:
-            plot_trajectories_2d(self.ref_traj_xyz, self.real_traj_xyz, "fuxi_realtime_tf.png")
-        else:
-            rospy.logerr("未采集到 TF 数据，无法绘图。请检查 TF Tree 是否正常 (rosrun rqt_tf_tree rqt_tf_tree)")
+        # 定义四个角 (右下 -> 右上 -> 左上 -> 左下 -> 右下)
+        # 注意：这里 Y 正是左，Y 负是右
+        corners = [
+            (center_x - size/2, center_y - size/2), # 近右
+            (center_x + size/2, center_y - size/2), # 远右
+            (center_x + size/2, center_y + size/2), # 远左
+            (center_x - size/2, center_y + size/2), # 近左
+            (center_x - size/2, center_y - size/2)  # 回到起点
+        ]
+        
+        # 插值生成
+        resolution = 0.02 # 每 2cm 一个点
+        for i in range(len(corners)-1):
+            p1 = corners[i]
+            p2 = corners[i+1]
+            dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+            steps = int(dist / resolution)
+            for s in range(steps):
+                alpha = s / float(steps)
+                x = p1[0] + (p2[0] - p1[0]) * alpha
+                y = p1[1] + (p2[1] - p1[1]) * alpha
+                waypoints.append([x, y, draw_z])
+                
+        rospy.loginfo(f"生成了 {len(waypoints)} 个轨迹点，开始执行...")
+        
+        rate = rospy.Rate(20) # 20Hz
+        
+        for pt in waypoints:
+            target_x, target_y, target_z = pt
+            
+            # 1. Swing 解算 (解析解)
+            # swing 角度 = atan2(y, x)
+            # 注意：实际距离要用 xy 平面投影距离
+            r_ground = math.hypot(target_x, target_y)
+            q_swing = math.atan2(target_y, target_x)
+            
+            # 2. 机械臂平面距离
+            # 机械臂只需要伸到 r_ground 这个距离，不管 y 是多少
+            x_planar = r_ground
+            
+            # 3. 智能 IK 解算
+            # 尝试垂直向下 (Pitch = -pi/2 = -1.57) 附近寻找解
+            q_list, final_pitch = self.kin.solve_ik_smart(x_planar, target_z, preferred_pitch=-1.57)
+            
+            if q_list:
+                # 发布命令
+                self.pub_swing.publish(q_swing)
+                self.pub_boom.publish(q_list[0])
+                self.pub_arm.publish(q_list[1])
+                self.pub_bucket.publish(q_list[2])
+                
+                # 记录期望轨迹
+                self.ref_traj.append([target_x, target_y])
+                
+                # 计算并记录实际轨迹 (利用 FK)
+                # 注意：这里需要把 Swing 加回来算实际坐标
+                # 简化：假设 swing 完美跟随，只算平面 FK 然后旋转
+                fk_x_planar, fk_z = self.kin.get_current_fk([q_list[0], q_list[1], q_list[2]])
+                real_x = fk_x_planar * math.cos(q_swing)
+                real_y = fk_x_planar * math.sin(q_swing)
+                self.actual_traj.append([real_x, real_y])
+                
+                # 如果 Pitch 调整很大，打印警告
+                if abs(final_pitch - (-1.57)) > 0.5:
+                    rospy.logwarn(f"调整姿态以触达点: Pitch {final_pitch:.2f}")
+            else:
+                rospy.logerr(f"点不可达: [{target_x:.2f}, {target_z:.2f}]")
+            
+            rate.sleep()
+            
+        self.plot_result()
 
-if __name__ == "__main__":
+    def plot_result(self):
+        rospy.loginfo("正在绘图...")
+        ref = np.array(self.ref_traj)
+        act = np.array(self.actual_traj)
+        
+        plt.figure(figsize=(10, 10))
+        if len(ref) > 0:
+            # 翻转 Y 轴以符合直觉 (左正右负 -> 画图时左边在图左边)
+            plt.plot(-ref[:, 1], ref[:, 0], 'r--', label='Reference', linewidth=2)
+        if len(act) > 0:
+            plt.plot(-act[:, 1], act[:, 0], 'b-', label='Actual (FK)', linewidth=1)
+            
+        plt.title("Excavator Smart IK Test")
+        plt.xlabel("Left <--- Y (m) ---> Right")
+        plt.ylabel("Front X (m)")
+        plt.legend()
+        plt.grid(True)
+        plt.axis('equal')
+        plt.savefig("smart_square_result.png")
+        plt.show()
+
+if __name__ == '__main__':
     try:
-        writer = FuxiWriter()
-        writer.run()
+        writer = SmartWriter()
+        writer.run_square_test()
     except rospy.ROSInterruptException:
         pass
